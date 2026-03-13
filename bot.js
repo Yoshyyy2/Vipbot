@@ -778,11 +778,18 @@ bot.onText(/\/request/, (msg) => {
     return bot.sendMessage(msg.chat.id, `✅ You already have access!`, { reply_markup: KB_MAIN });
   }
   const db = loadDB();
-  if (db.pendingAccess.find(r => toId(r.userId) === toId(userId))) {
-    return bot.sendMessage(msg.chat.id, `⏳ Your request is already pending. Please wait!`);
-  }
+  // Remove any broken old pending entry for this user first
+  db.pendingAccess = db.pendingAccess.filter(r => toId(r.userId) !== toId(userId));
+  // Create fresh request
   const requestId = uuidv4().slice(0, 8);
-  db.pendingAccess.push({ requestId, userId, name: msg.from.first_name, username: msg.from.username || 'N/A', requestedAt: new Date().toISOString() });
+  const entry = {
+    requestId: requestId,
+    userId: toId(userId),
+    name: msg.from.first_name || 'Unknown',
+    username: msg.from.username || 'N/A',
+    requestedAt: new Date().toISOString()
+  };
+  db.pendingAccess.push(entry);
   saveDB(db);
   bot.sendMessage(msg.chat.id,
     `✅ *Request Submitted!*\n\n⏳ Please wait for admin approval.`,
@@ -790,14 +797,17 @@ bot.onText(/\/request/, (msg) => {
   );
   bot.sendMessage(config.ADMIN_ID,
     `🔔 *New Access Request*\n${LINE}\n` +
-    `👤 *Name*     : ${msg.from.first_name}\n` +
-    `🆔 *User ID*  : \`${userId}\`\n` +
-    `📛 *Username* : @${msg.from.username || 'N/A'}\n${LINE}`,
+    `👤 *Name*     : ${entry.name}\n` +
+    `🆔 *User ID*  : \`${entry.userId}\`\n` +
+    `📛 *Username* : @${entry.username}\n` +
+    `🔑 *Request ID* : \`${requestId}\`\n${LINE}\n` +
+    `To approve: /grantaccess ${requestId}\n` +
+    `To deny: /denyaccess ${requestId}`,
     { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[
       { text: '✅ Approve', callback_data: `grant_${requestId}` },
       { text: '❌ Deny',    callback_data: `deny_${requestId}`  }
     ]] }}
-  ).catch(() => {});
+  ).catch((e) => { console.error('[REQUEST NOTIFY]', e.message); });
 });
 
 bot.onText(/\/createssh/,    msg => guard(msg, () => startCreate(msg.chat.id, msg.from.id, 'ssh')));
@@ -884,6 +894,18 @@ bot.onText(/\/stats/, (msg) => {
     `${LINE}\n👑 *Server by Yosh*`,
     { parse_mode: 'Markdown' }
   );
+});
+
+bot.onText(/\/debugdb/, (msg) => {
+  if (!isAdmin(msg.from.id)) return;
+  const db = loadDB();
+  const info = {
+    pendingCount: db.pendingAccess.length,
+    approvedCount: db.approvedUsers.length,
+    pending: db.pendingAccess,
+    approved: db.approvedUsers
+  };
+  bot.sendMessage(msg.chat.id, '```json\n' + JSON.stringify(info, null, 2).slice(0, 3500) + '\n```', { parse_mode: 'Markdown' });
 });
 
 bot.onText(/\/clearpending/, (msg) => {
@@ -1000,6 +1022,36 @@ bot.setMyCommands([
 // ══════════════════════════════════════════════════════════════
 //  ERROR HANDLERS
 // ══════════════════════════════════════════════════════════════
+
+// Fallback text commands for grant/deny (in case buttons fail)
+bot.onText(/\/grantaccess (.+)/, (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+  const rid = match[1].trim();
+  const db  = loadDB();
+  const req = db.pendingAccess.find(r => r.requestId === rid);
+  if (!req) return bot.sendMessage(msg.chat.id, `❌ Request not found: ${rid}`);
+  if (!db.approvedUsers.map(toId).includes(toId(req.userId))) db.approvedUsers.push(toId(req.userId));
+  db.pendingAccess = db.pendingAccess.filter(r => r.requestId !== rid);
+  saveDB(db);
+  bot.sendMessage(msg.chat.id, `✅ Approved *${req.name}* (\`${req.userId}\`)`, { parse_mode: 'Markdown' });
+  bot.sendMessage(req.userId,
+    `🎉 *Access Granted!*\n\nWelcome to *🇸🇬 Yosh VIP Bot!*\nSend /menu to get started!`,
+    { parse_mode: 'Markdown' }
+  ).catch(() => {});
+});
+
+bot.onText(/\/denyaccess (.+)/, (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+  const rid = match[1].trim();
+  const db  = loadDB();
+  const req = db.pendingAccess.find(r => r.requestId === rid);
+  if (!req) return bot.sendMessage(msg.chat.id, `❌ Request not found: ${rid}`);
+  db.pendingAccess = db.pendingAccess.filter(r => r.requestId !== rid);
+  saveDB(db);
+  bot.sendMessage(msg.chat.id, `❌ Denied *${req.name}*`, { parse_mode: 'Markdown' });
+  bot.sendMessage(req.userId, `❌ Your access request was denied.`).catch(() => {});
+});
+
 bot.on('polling_error', err => console.error('[POLLING]', err.message));
 bot.on('error',         err => console.error('[BOT]',     err.message));
 
