@@ -886,9 +886,25 @@ bot.onText(/\/stats/, (msg) => {
   );
 });
 
+bot.onText(/\/clearpending/, (msg) => {
+  if (!isAdmin(msg.from.id)) return;
+  const db = loadDB();
+  db.pendingAccess = [];
+  saveDB(db);
+  bot.sendMessage(msg.chat.id, `✅ All pending requests cleared!`);
+});
+
 bot.onText(/\/pending/, (msg) => {
   if (!isAdmin(msg.from.id)) return;
   const db = loadDB();
+  // Auto-repair: assign requestId to any entry missing one
+  let repaired = false;
+  db.pendingAccess.forEach(r => {
+    if (!r.requestId) { r.requestId = uuidv4().slice(0, 8); repaired = true; }
+    if (!r.name)      { r.name = 'Unknown'; }
+    if (!r.username)  { r.username = 'N/A'; }
+  });
+  if (repaired) saveDB(db);
   if (!db.pendingAccess.length) return bot.sendMessage(msg.chat.id, `📭 No pending requests.`);
   let text = `⏳ *Pending Requests* (${db.pendingAccess.length})\n${LINE}\n\n`;
   db.pendingAccess.forEach(r => {
