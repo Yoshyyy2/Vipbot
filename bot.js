@@ -610,7 +610,7 @@ bot.on('callback_query', async (q) => {
         { chat_id: chatId, message_id: msgId });
     }
     const requestId = uuidv4().slice(0, 8);
-    db.pendingAccess.push({ requestId, userId, name: q.from.first_name, username: q.from.username || 'N/A', requestedAt: new Date().toISOString() });
+    db.pendingAccess.push({ requestId, userId: toId(userId), name: q.from.first_name, username: q.from.username || 'N/A', requestedAt: new Date().toISOString() });
     saveDB(db);
     bot.editMessageText(`✅ *Request Submitted!*\n\n⏳ Waiting for admin approval...`,
       { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown' });
