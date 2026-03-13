@@ -45,9 +45,10 @@ function saveDB(db) {
 // ══════════════════════════════════════════════════════════════
 //  AUTH HELPERS
 // ══════════════════════════════════════════════════════════════
-const isAdmin    = id => id.toString() === config.ADMIN_ID.toString();
-const isApproved = id => isAdmin(id) || loadDB().approvedUsers.includes(id);
-const isBanned   = id => loadDB().bannedUsers.includes(id);
+const toId       = id => parseInt(id);
+const isAdmin    = id => toId(id) === toId(config.ADMIN_ID);
+const isApproved = id => isAdmin(id) || loadDB().approvedUsers.map(toId).includes(toId(id));
+const isBanned   = id => loadDB().bannedUsers.map(toId).includes(toId(id));
 
 // ══════════════════════════════════════════════════════════════
 //  UTILITY
@@ -604,7 +605,7 @@ bot.on('callback_query', async (q) => {
   if (data === 'request_access') {
     if (isApproved(userId)) return;
     const db = loadDB();
-    if (db.pendingAccess.find(r => r.userId === userId)) {
+    if (db.pendingAccess.find(r => toId(r.userId) === toId(userId))) {
       return bot.editMessageText(`⏳ Already pending! Please wait for admin approval.`,
         { chat_id: chatId, message_id: msgId });
     }
@@ -700,7 +701,7 @@ bot.on('callback_query', async (q) => {
     const db  = loadDB();
     const req = db.pendingAccess.find(r => r.requestId === rid);
     if (!req) return bot.editMessageText(`❌ Request not found or already handled.`, { chat_id: chatId, message_id: msgId });
-    if (!db.approvedUsers.includes(req.userId)) db.approvedUsers.push(req.userId);
+    if (!db.approvedUsers.map(toId).includes(toId(req.userId))) db.approvedUsers.push(toId(req.userId));
     db.pendingAccess = db.pendingAccess.filter(r => r.requestId !== rid);
     saveDB(db);
     bot.editMessageText(`✅ *Approved* — ${req.name} (\`${req.userId}\`)`,
@@ -777,7 +778,7 @@ bot.onText(/\/request/, (msg) => {
     return bot.sendMessage(msg.chat.id, `✅ You already have access!`, { reply_markup: KB_MAIN });
   }
   const db = loadDB();
-  if (db.pendingAccess.find(r => r.userId === userId)) {
+  if (db.pendingAccess.find(r => toId(r.userId) === toId(userId))) {
     return bot.sendMessage(msg.chat.id, `⏳ Your request is already pending. Please wait!`);
   }
   const requestId = uuidv4().slice(0, 8);
@@ -891,7 +892,7 @@ bot.onText(/\/pending/, (msg) => {
   if (!db.pendingAccess.length) return bot.sendMessage(msg.chat.id, `📭 No pending requests.`);
   let text = `⏳ *Pending Requests* (${db.pendingAccess.length})\n${LINE}\n\n`;
   db.pendingAccess.forEach(r => {
-    text += `👤 *${r.name}* (@${r.username})\n🆔 \`${r.userId}\`\n\n`;
+    text += `👤 *${r.name}* (@${r.username || 'N/A'})\n🆔 \`${r.userId}\`\n📅 ${r.requestedAt ? formatDate(r.requestedAt) : 'N/A'}\n\n`;
   });
   bot.sendMessage(msg.chat.id, text, {
     parse_mode: 'Markdown',
