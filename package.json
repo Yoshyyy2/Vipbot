@@ -1,0 +1,15 @@
+{
+  "name": "yosh-vip-bot",
+  "version": "3.0.0",
+  "description": "🇸🇬 Yosh VIP Telegram Bot — SSH, VLESS, VMess, Trojan account manager",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "pm2": "pm2 start bot.js --name yosh-bot"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0",
+    "uuid": "^9.0.0"
+  }
+}
+
