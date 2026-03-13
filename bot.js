@@ -930,7 +930,9 @@ bot.onText(/\/pending/, (msg) => {
   if (!db.pendingAccess.length) return bot.sendMessage(msg.chat.id, `📭 No pending requests.`);
   let text = `⏳ *Pending Requests* (${db.pendingAccess.length})\n${LINE}\n\n`;
   db.pendingAccess.forEach(r => {
-    text += `👤 *${r.name}* (@${r.username || 'N/A'})\n🆔 \`${r.userId}\`\n📅 ${r.requestedAt ? formatDate(r.requestedAt) : 'N/A'}\n\n`;
+    const safeUser = (r.username || 'N/A').replace(/_/g, '\\_');
+const safeName = (r.name || 'Unknown').replace(/_/g, '\\_');
+text += `👤 *${safeName}* (@${safeUser})\n🆔 \`${r.userId}\`\n📅 ${r.requestedAt ? formatDate(r.requestedAt) : 'N/A'}\n\n`;
   });
   bot.sendMessage(msg.chat.id, text, {
     parse_mode: 'Markdown',
