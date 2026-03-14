@@ -13,7 +13,8 @@ const bot    = new TelegramBot(config.BOT_TOKEN, { polling: true });
 //  CONSTANTS
 // ══════════════════════════════════════════════════════════════
 const DB_FILE     = path.join(__dirname, 'accounts.json');
-const EXPIRY_DAYS = config.EXPIRY_DAYS || 3;
+const EXPIRY_DAYS  = config.EXPIRY_DAYS  || 3;
+const DAILY_CREDITS = config.DAILY_CREDITS || 2;
 
 const COST       = { ssh: 3, vless: 2, vmess: 2, trojan: 2 };
 const PROTO_ICON = { ssh: '🖥️', vless: '📡', vmess: '📡', trojan: '🛡️' };
@@ -596,7 +597,8 @@ bot.on('callback_query', async (q) => {
       `🏠 /menu — Open main menu\n` +
       `🎟️ /redeem <code> — Redeem a code\n` +
       `💰 /credits — Check your credits\n` +
-      `🖥️ /createssh — Create SSH _(3 credits)_\n` +
+      `🎁 /daily — Claim free daily credits\n` +
+    `🖥️ /createssh — Create SSH _(3 credits)_\n` +
       `📡 /createvless — Create VLESS _(2 credits)_\n` +
       `📡 /createvmess — Create VMess _(2 credits)_\n` +
       `🛡️ /createtrojan — Create Trojan _(2 credits)_\n` +
@@ -752,6 +754,7 @@ bot.onText(/\/help/, (msg) => {
       `💰 /addcredits <id> <amount> — Add credits\n` +
       `💳 /setcredits <id> <amount> — Set credits\n` +
       `🔄 /resetuser <id> — Reset credits to 0\n` +
+      `📅 /setdaily <amount> — Set daily credits amount\n` +
       `🎁 /giveall <amount> — Give credits to all\n` +
       `📡 /broadcast <msg> — Message all users\n` +
       `🏆 /topusers — Top users by accounts\n` +
@@ -769,6 +772,7 @@ bot.onText(/\/help/, (msg) => {
     `🏠 /menu — Open main menu\n` +
     `🎟️ /redeem <code> — Redeem a code\n` +
     `💰 /credits — Check your credits\n` +
+    `🎁 /daily — Claim free daily credits\n` +
     `🖥️ /createssh — Create SSH _(3 credits)_\n` +
     `📡 /createvless — Create VLESS _(2 credits)_\n` +
     `📡 /createvmess — Create VMess _(2 credits)_\n` +
@@ -1005,59 +1009,7 @@ bot.onText(/\/expiry/, (msg) => {
   bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown', reply_markup: KB_BACK });
 });
 
-bot.onText(/\/extend(.*)/, (msg, match) => {
-  if (isBanned(msg.from.id)) return;
-  registerUser(msg.from.id, msg.from.first_name);
-  const userId     = msg.from.id;
-  const args       = (match[1] || '').trim().split(/\s+/);
-  const EXTEND_COST = 2;
 
-  if (!args[0]) {
-    const accs = getActiveAccounts(userId);
-    if (!accs.length) return bot.sendMessage(msg.chat.id, `📭 No active accounts to extend.`);
-    let text = `🔄 *Extend Account*\n${LINE}\n\n`;
-    text += `Costs *${EXTEND_COST} credits* per day extension\n\n`;
-    text += `Usage: \`/extend <username> <days>\`\nExample: \`/extend john 2\`\n\n`;
-    text += `*Your active accounts:*\n`;
-    accs.forEach((a, i) => { text += `${i+1}. \`${a.username || a.password}\` (${a.type.toUpperCase()})\n`; });
-    return bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
-  }
-
-  const username = args[0];
-  const days     = parseInt(args[1]) || 1;
-  const cost     = days * EXTEND_COST;
-  const credits  = getCredits(userId);
-
-  if (!isAdmin(userId) && credits < cost) {
-    return bot.sendMessage(msg.chat.id,
-      `❌ *Not Enough Credits!*\n\n💰 You have: *${credits}*\n💸 Cost: *${cost}* (${days} day × ${EXTEND_COST} credits)\n\nUse /redeem to get more credits!`,
-      { parse_mode: 'Markdown' }
-    );
-  }
-
-  const db  = loadDB();
-  const acc = db.accounts.find(a =>
-    a.userId === toId(userId) &&
-    (a.username || a.password || '').toLowerCase() === username.toLowerCase()
-  );
-  if (!acc) return bot.sendMessage(msg.chat.id, `❌ Account \`${username}\` not found in your active accounts.`, { parse_mode: 'Markdown' });
-
-  const newExp = new Date(acc.expiry);
-  newExp.setDate(newExp.getDate() + days);
-  acc.expiry = newExp.toISOString();
-  saveDB(db);
-  if (!isAdmin(userId)) deductCredits(userId, cost);
-
-  bot.sendMessage(msg.chat.id,
-    `✅ *Account Extended!*\n${LINE}\n` +
-    `👤 *Account*    : \`${username}\`\n` +
-    `➕ *Extended*   : *+${days}* day(s)\n` +
-    `📅 *New Expiry* : ${formatDate(acc.expiry)}\n` +
-    `💰 *Credits Used* : ${isAdmin(userId) ? 0 : cost} | *Remaining* : ${creditsDisplay(userId)}\n` +
-    `${LINE}`,
-    { parse_mode: 'Markdown' }
-  );
-});
 
 // ══════════════════════════════════════════════════════════════
 //  ADMIN COMMANDS — /broadcast /setcredits /resetuser
@@ -1167,6 +1119,65 @@ bot.onText(/\/giveall (\d+)/, async (msg, match) => {
 });
 
 // ══════════════════════════════════════════════════════════════
+//  /daily — Claim free daily credits
+// ══════════════════════════════════════════════════════════════
+bot.onText(/\/daily/, (msg) => {
+  if (isBanned(msg.from.id)) return;
+  registerUser(msg.from.id, msg.from.first_name);
+  if (isAdmin(msg.from.id)) return bot.sendMessage(msg.chat.id, `👑 You're admin, you have unlimited credits!`);
+
+  const db      = loadDB();
+  const userId  = toId(msg.from.id);
+  const u       = db.users[userId];
+  const now     = new Date();
+  const amount  = db.dailyCredits || DAILY_CREDITS;
+
+  // Check if already claimed today
+  if (u.lastDaily) {
+    const last     = new Date(u.lastDaily);
+    const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
+    if (last >= midnight) {
+      const tomorrow = new Date(now); tomorrow.setHours(24, 0, 0, 0);
+      const diff = tomorrow - now;
+      const h = Math.floor(diff / 3600000);
+      const m = Math.floor((diff % 3600000) / 60000);
+      return bot.sendMessage(msg.chat.id,
+        `⏰ *Already Claimed!*\n\nYou already claimed your daily credits today.\n\n🔄 Resets in: *${h}h ${m}m*`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  }
+
+  // Give credits
+  u.credits   += amount;
+  u.lastDaily  = now.toISOString();
+  saveDB(db);
+
+  bot.sendMessage(msg.chat.id,
+    `🎁 *Daily Credits Claimed!*\n${LINE}\n\n` +
+    `💰 *Credits Got* : *+${amount}*\n` +
+    `💳 *Total Now*   : *${u.credits}*\n\n` +
+    `${LINE}\n` +
+    `Come back tomorrow for more! 🔄`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// Admin: set daily credits amount
+bot.onText(/\/setdaily (\d+)/, (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+  const amount = parseInt(match[1]);
+  if (isNaN(amount) || amount <= 0) return bot.sendMessage(msg.chat.id, `❌ Usage: /setdaily <amount>\nExample: /setdaily 3`);
+  const db = loadDB();
+  db.dailyCredits = amount;
+  saveDB(db);
+  bot.sendMessage(msg.chat.id,
+    `✅ Daily credits set to *${amount}*!\n\nUsers will now get *+${amount}* credits when they use /daily.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ══════════════════════════════════════════════════════════════
 //  REGISTER SLASH COMMANDS
 // ══════════════════════════════════════════════════════════════
 bot.setMyCommands([
@@ -1176,7 +1187,7 @@ bot.setMyCommands([
   { command: 'credits',      description: '💰 Check your credits' },
   { command: 'profile',      description: '👤 View your profile & stats' },
   { command: 'expiry',       description: '⏳ Check account expiry countdown' },
-  { command: 'extend',       description: '🔄 Extend account expiry (2 credits/day)' },
+  { command: 'daily',        description: '🎁 Claim your free daily credits' },
   { command: 'createssh',    description: '🖥️ Create SSH (3 credits)' },
   { command: 'createvless',  description: '📡 Create VLESS (2 credits)' },
   { command: 'createvmess',  description: '📡 Create VMess (2 credits)' },
