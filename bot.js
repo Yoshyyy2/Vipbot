@@ -653,10 +653,37 @@ bot.onText(/\/redeem(.*)/, (msg, match) => {
 
   const db    = loadDB();
   const entry = db.codes.find(c => c.code === code);
-  if (!entry)       return bot.sendMessage(msg.chat.id, `❌ *Invalid code!* Check the code and try again.`, { parse_mode: 'Markdown' });
-  if (entry.usedBy) return bot.sendMessage(msg.chat.id, `❌ *Code already used!* This code has been redeemed already.`, { parse_mode: 'Markdown' });
+  if (!entry) return bot.sendMessage(msg.chat.id, `❌ *Invalid code!* Check the code and try again.`, { parse_mode: 'Markdown' });
 
-  entry.usedBy   = toId(userId);
+  // Daily redeem limit (3 per day per user, admin bypasses)
+  if (!isAdmin(userId)) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const allUsedToday = db.codes.reduce((count, c) => {
+      const list = c.usedList || [];
+      return count + list.filter(u => toId(u.userId) === toId(userId) && new Date(u.usedAt) >= today).length;
+    }, 0);
+    if (allUsedToday >= 3) {
+      const tomorrow = new Date(); tomorrow.setHours(24, 0, 0, 0);
+      const diff = tomorrow - new Date();
+      const h = Math.floor(diff / 3600000);
+      const m = Math.floor((diff % 3600000) / 60000);
+      return bot.sendMessage(msg.chat.id,
+        `❌ *Daily Redeem Limit Reached!*\n\nYou can only redeem *3 codes per day*.\n⏰ Resets in: *${h}h ${m}m*`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  }
+
+  // Multi-use support
+  const maxUses  = entry.maxUses || 1;
+  const usedList = entry.usedList || (entry.usedBy ? [{ userId: entry.usedBy, name: entry.usedName, usedAt: entry.usedAt }] : []);
+  const alreadyUsed = usedList.find(u => toId(u.userId) === toId(userId));
+  if (alreadyUsed) return bot.sendMessage(msg.chat.id, `❌ *Already Redeemed!* You already used this code.`, { parse_mode: 'Markdown' });
+  if (usedList.length >= maxUses) return bot.sendMessage(msg.chat.id, `❌ *Code Full!* This code has reached its maximum uses (${maxUses}).`, { parse_mode: 'Markdown' });
+
+  usedList.push({ userId: toId(userId), name: msg.from.first_name, usedAt: new Date().toISOString() });
+  entry.usedList = usedList;
+  entry.usedBy   = toId(userId); // keep for backwards compat
   entry.usedAt   = new Date().toISOString();
   entry.usedName = msg.from.first_name;
   db.users[toId(userId)].credits += entry.credits;
@@ -718,9 +745,16 @@ bot.onText(/\/help/, (msg) => {
     return bot.sendMessage(msg.chat.id,
       `🛠️ *Admin Commands*\n${LINE}\n` +
       `📊 /stats — Bot statistics\n` +
-      `🎟️ /gencode <credits> — Generate redeem code\n` +
+      `🎟️ /gencode <credits> <max> — Generate code\n` +
+      `📦 /gencodes <count> <credits> <max> — Bulk generate\n` +
       `📋 /codes — List all codes\n` +
+      `🗑️ /deletecode <code> — Delete a code\n` +
       `💰 /addcredits <id> <amount> — Add credits\n` +
+      `💳 /setcredits <id> <amount> — Set credits\n` +
+      `🔄 /resetuser <id> — Reset credits to 0\n` +
+      `🎁 /giveall <amount> — Give credits to all\n` +
+      `📡 /broadcast <msg> — Message all users\n` +
+      `🏆 /topusers — Top users by accounts\n` +
       `👥 /users — List all users\n` +
       `🚫 /ban <id> — Ban a user\n` +
       `✅ /unban <id> — Unban a user\n` +
@@ -750,16 +784,24 @@ bot.onText(/\/help/, (msg) => {
 // ══════════════════════════════════════════════════════════════
 bot.onText(/\/gencode (.+)/, (msg, match) => {
   if (!isAdmin(msg.from.id)) return;
-  const amount = parseInt(match[1]);
-  if (isNaN(amount) || amount <= 0) return bot.sendMessage(msg.chat.id, `❌ Usage: /gencode <credits>\nExample: /gencode 10`);
+  const args    = match[1].trim().split(/\s+/);
+  const amount  = parseInt(args[0]);
+  const maxUses = parseInt(args[1]) || 1;
+  if (isNaN(amount) || amount <= 0) {
+    return bot.sendMessage(msg.chat.id,
+      `❌ Usage: /gencode <credits> <max_users>\nExample: /gencode 10 5\n_max_users is optional, default is 1_`,
+      { parse_mode: 'Markdown' }
+    );
+  }
   const code = 'YOSH-' + uuidv4().slice(0, 8).toUpperCase();
   const db   = loadDB();
-  db.codes.push({ code, credits: amount, usedBy: null, createdAt: new Date().toISOString() });
+  db.codes.push({ code, credits: amount, maxUses, usedList: [], usedBy: null, createdAt: new Date().toISOString() });
   saveDB(db);
   bot.sendMessage(msg.chat.id,
     `✅ *Redeem Code Generated!*\n${LINE}\n` +
-    `🎟️ *Code*    : \`${code}\`\n` +
-    `💰 *Credits* : *${amount}*\n` +
+    `🎟️ *Code*      : \`${code}\`\n` +
+    `💰 *Credits*   : *${amount}*\n` +
+    `👥 *Max Users* : *${maxUses}*\n` +
     `${LINE}\n` +
     `Share to user → \`/redeem ${code}\``,
     { parse_mode: 'Markdown' }
@@ -770,12 +812,60 @@ bot.onText(/\/codes/, (msg) => {
   if (!isAdmin(msg.from.id)) return;
   const db = loadDB();
   if (!db.codes.length) return bot.sendMessage(msg.chat.id, `📭 No codes generated yet.`);
-  let text = `🎟️ *All Codes*\n${LINE}\n\n`;
+  let text = `🎟️ *All Codes* (${db.codes.length})
+${LINE}\n\n`;
   db.codes.slice(-20).forEach((c, i) => {
-    const status = c.usedBy ? `✅ Used by \`${c.usedBy}\`` : `🟢 Available`;
-    text += `${i+1}. \`${c.code}\` — *${c.credits}* credits\n   ${status}\n\n`;
+    const maxUses  = c.maxUses || 1;
+    const usedList = c.usedList || (c.usedBy ? [c.usedBy] : []);
+    const usedCount = usedList.length;
+    const isFull  = usedCount >= maxUses;
+    const status  = isFull ? `🔴 Full (${usedCount}/${maxUses})` : `🟢 Available (${usedCount}/${maxUses})`;
+    text += `${i+1}. \`${c.code}\`\n`;
+    text += `   💰 *${c.credits}* credits | 👥 ${status}\n\n`;
   });
   bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+});
+
+// Bulk generate codes
+bot.onText(/\/gencodes (.+)/, async (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+  const args     = match[1].trim().split(/\s+/);
+  const count    = parseInt(args[0]);
+  const amount   = parseInt(args[1]);
+  const maxUses  = parseInt(args[2]) || 1;
+  if (isNaN(count) || isNaN(amount) || count <= 0 || amount <= 0) {
+    return bot.sendMessage(msg.chat.id,
+      `❌ Usage: /gencodes <count> <credits> <max_users>\nExample: /gencodes 10 5 3\n_max_users is optional, default is 1_`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+  if (count > 50) return bot.sendMessage(msg.chat.id, `❌ Max 50 codes at once!`);
+  const db    = loadDB();
+  const codes = [];
+  for (let i = 0; i < count; i++) {
+    const code = 'YOSH-' + uuidv4().slice(0, 8).toUpperCase();
+    db.codes.push({ code, credits: amount, maxUses, usedList: [], usedBy: null, createdAt: new Date().toISOString() });
+    codes.push(code);
+  }
+  saveDB(db);
+  let text = `✅ *${count} Codes Generated!*\n${LINE}\n`;
+  text += `💰 *Credits each* : *${amount}*\n`;
+  text += `👥 *Max users each* : *${maxUses}*\n`;
+  text += `${LINE}\n\n`;
+  codes.forEach((c, i) => { text += `${i+1}. \`${c}\`\n`; });
+  // Split if too long
+  if (text.length > 4000) {
+    const chunks = [];
+    let chunk = `✅ *${count} Codes Generated!*\n${LINE}\n💰 *${amount}* credits | 👥 max *${maxUses}* users each\n${LINE}\n\n`;
+    codes.forEach((c, i) => {
+      chunk += `${i+1}. \`${c}\`\n`;
+      if (chunk.length > 3500) { chunks.push(chunk); chunk = ''; }
+    });
+    if (chunk) chunks.push(chunk);
+    for (const ch of chunks) await bot.sendMessage(msg.chat.id, ch, { parse_mode: 'Markdown' });
+  } else {
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  }
 });
 
 bot.onText(/\/addcredits (\d+) (\d+)/, (msg, match) => {
@@ -863,6 +953,220 @@ bot.onText(/\/clearaccounts/, (msg) => {
 });
 
 // ══════════════════════════════════════════════════════════════
+//  USER COMMANDS — /profile  /expiry  /extend
+// ══════════════════════════════════════════════════════════════
+bot.onText(/\/profile/, (msg) => {
+  if (isBanned(msg.from.id)) return;
+  registerUser(msg.from.id, msg.from.first_name);
+  const db      = loadDB();
+  const userId  = toId(msg.from.id);
+  const u       = db.users[userId] || {};
+  const now     = new Date();
+  const active  = db.accounts.filter(a => a.userId === userId && new Date(a.expiry) > now);
+  const allTime = db.accounts.filter(a => a.userId === userId).length;
+  const since   = u.registeredAt ? formatDate(u.registeredAt) : 'N/A';
+  bot.sendMessage(msg.chat.id,
+    `👤 *Your Profile*\n${LINE}\n\n` +
+    `🙍 *Name*          : ${msg.from.first_name}\n` +
+    `🆔 *User ID*       : \`${userId}\`\n` +
+    `📅 *Member Since*  : ${since}\n` +
+    `${LINE}\n` +
+    `💰 *Credits*       : *${creditsDisplay(msg.from.id)}*\n` +
+    `📋 *Active Accs*   : *${active.length}*\n` +
+    `📊 *Total Created* : *${allTime}*\n` +
+    `${LINE}\n` +
+    `🖥️ SSH costs *3 credits* · 📡 V2Ray costs *2 credits*`,
+    { parse_mode: 'Markdown', reply_markup: KB_BACK }
+  );
+});
+
+bot.onText(/\/expiry/, (msg) => {
+  if (isBanned(msg.from.id)) return;
+  const now  = new Date();
+  const accs = getActiveAccounts(msg.from.id);
+  if (!accs.length) {
+    return bot.sendMessage(msg.chat.id, `📭 *No Active Accounts*\n\nYou have no active accounts right now.`, { parse_mode: 'Markdown' });
+  }
+  let text = `⏳ *Account Expiry*\n${LINE}\n\n`;
+  accs.forEach((a, i) => {
+    const exp     = new Date(a.expiry);
+    const diff    = exp - now;
+    const hours   = Math.floor(diff / 3600000);
+    const minutes = Math.floor((diff % 3600000) / 60000);
+    const days    = Math.floor(hours / 24);
+    const hLeft   = hours % 24;
+    const countdown = days > 0 ? `${days}d ${hLeft}h ${minutes}m` : `${hours}h ${minutes}m`;
+    text += `${i+1}. ${PROTO_ICON[a.type]} *${a.type.toUpperCase()}*\n`;
+    text += `   👤 \`${a.username || a.password}\`\n`;
+    text += `   📅 ${formatDate(a.expiry)}\n`;
+    text += `   ⏱️ Expires in: *${countdown}*\n\n`;
+  });
+  text += `${LINE}\nTotal: *${accs.length}* account(s)`;
+  bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown', reply_markup: KB_BACK });
+});
+
+bot.onText(/\/extend(.*)/, (msg, match) => {
+  if (isBanned(msg.from.id)) return;
+  registerUser(msg.from.id, msg.from.first_name);
+  const userId     = msg.from.id;
+  const args       = (match[1] || '').trim().split(/\s+/);
+  const EXTEND_COST = 2;
+
+  if (!args[0]) {
+    const accs = getActiveAccounts(userId);
+    if (!accs.length) return bot.sendMessage(msg.chat.id, `📭 No active accounts to extend.`);
+    let text = `🔄 *Extend Account*\n${LINE}\n\n`;
+    text += `Costs *${EXTEND_COST} credits* per day extension\n\n`;
+    text += `Usage: \`/extend <username> <days>\`\nExample: \`/extend john 2\`\n\n`;
+    text += `*Your active accounts:*\n`;
+    accs.forEach((a, i) => { text += `${i+1}. \`${a.username || a.password}\` (${a.type.toUpperCase()})\n`; });
+    return bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  }
+
+  const username = args[0];
+  const days     = parseInt(args[1]) || 1;
+  const cost     = days * EXTEND_COST;
+  const credits  = getCredits(userId);
+
+  if (!isAdmin(userId) && credits < cost) {
+    return bot.sendMessage(msg.chat.id,
+      `❌ *Not Enough Credits!*\n\n💰 You have: *${credits}*\n💸 Cost: *${cost}* (${days} day × ${EXTEND_COST} credits)\n\nUse /redeem to get more credits!`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  const db  = loadDB();
+  const acc = db.accounts.find(a =>
+    a.userId === toId(userId) &&
+    (a.username || a.password || '').toLowerCase() === username.toLowerCase()
+  );
+  if (!acc) return bot.sendMessage(msg.chat.id, `❌ Account \`${username}\` not found in your active accounts.`, { parse_mode: 'Markdown' });
+
+  const newExp = new Date(acc.expiry);
+  newExp.setDate(newExp.getDate() + days);
+  acc.expiry = newExp.toISOString();
+  saveDB(db);
+  if (!isAdmin(userId)) deductCredits(userId, cost);
+
+  bot.sendMessage(msg.chat.id,
+    `✅ *Account Extended!*\n${LINE}\n` +
+    `👤 *Account*    : \`${username}\`\n` +
+    `➕ *Extended*   : *+${days}* day(s)\n` +
+    `📅 *New Expiry* : ${formatDate(acc.expiry)}\n` +
+    `💰 *Credits Used* : ${isAdmin(userId) ? 0 : cost} | *Remaining* : ${creditsDisplay(userId)}\n` +
+    `${LINE}`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ══════════════════════════════════════════════════════════════
+//  ADMIN COMMANDS — /broadcast /setcredits /resetuser
+//                   /deletecode /topusers /giveall
+// ══════════════════════════════════════════════════════════════
+bot.onText(/\/broadcast(.+)/, async (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+  const text = match[1].trim();
+  if (!text) return bot.sendMessage(msg.chat.id, `❌ Usage: /broadcast <message>`);
+  const db = loadDB();
+  const ids = Object.keys(db.users);
+  bot.sendMessage(msg.chat.id, `📡 Broadcasting to *${ids.length}* users...`, { parse_mode: 'Markdown' });
+  let ok = 0, fail = 0;
+  for (const id of ids) {
+    try {
+      await bot.sendMessage(toId(id),
+        `📢 *Message from Admin*\n${LINE}\n\n${text}\n\n${LINE}\n👑 *Yosh VIP Bot*`,
+        { parse_mode: 'Markdown' }
+      );
+      ok++;
+    } catch { fail++; }
+    await new Promise(r => setTimeout(r, 50));
+  }
+  bot.sendMessage(msg.chat.id, `✅ Broadcast done!\n✔️ Sent: *${ok}* | ❌ Failed: *${fail}*`, { parse_mode: 'Markdown' });
+});
+
+bot.onText(/\/setcredits (\d+) (\d+)/, (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+  const targetId = toId(match[1]);
+  const amount   = parseInt(match[2]);
+  const db = loadDB();
+  if (!db.users[targetId]) db.users[targetId] = { name: 'User', credits: 0, registeredAt: new Date().toISOString() };
+  db.users[targetId].credits = amount;
+  saveDB(db);
+  bot.sendMessage(msg.chat.id, `✅ Set credits of \`${targetId}\` to *${amount}*`, { parse_mode: 'Markdown' });
+  bot.sendMessage(targetId, `💰 *Credits Updated!*\n\nYour credits have been set to *${amount}* by admin.`, { parse_mode: 'Markdown' }).catch(() => {});
+});
+
+bot.onText(/\/resetuser (\d+)/, (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+  const targetId = toId(match[1]);
+  const db = loadDB();
+  if (!db.users[targetId]) return bot.sendMessage(msg.chat.id, `❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
+  db.users[targetId].credits = 0;
+  saveDB(db);
+  bot.sendMessage(msg.chat.id, `✅ Reset credits of \`${targetId}\` to *0*`, { parse_mode: 'Markdown' });
+  bot.sendMessage(targetId, `⚠️ Your credits have been reset to *0* by admin.`, { parse_mode: 'Markdown' }).catch(() => {});
+});
+
+bot.onText(/\/deletecode (.+)/, (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+  const code = match[1].trim().toUpperCase();
+  const db   = loadDB();
+  const before = db.codes.length;
+  db.codes = db.codes.filter(c => c.code !== code);
+  saveDB(db);
+  if (db.codes.length < before) {
+    bot.sendMessage(msg.chat.id, `✅ Code \`${code}\` deleted!`, { parse_mode: 'Markdown' });
+  } else {
+    bot.sendMessage(msg.chat.id, `❌ Code \`${code}\` not found.`, { parse_mode: 'Markdown' });
+  }
+});
+
+bot.onText(/\/topusers/, (msg) => {
+  if (!isAdmin(msg.from.id)) return;
+  const db = loadDB();
+  const counts = {};
+  db.accounts.forEach(a => { counts[a.userId] = (counts[a.userId] || 0) + 1; });
+  const sorted = Object.entries(db.users)
+    .map(([id, u]) => ({ id, name: u.name, credits: u.credits, total: counts[id] || 0 }))
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 10);
+  if (!sorted.length) return bot.sendMessage(msg.chat.id, `📭 No users yet.`);
+  let text = `🏆 *Top Users*\n${LINE}\n\n`;
+  const medals = ['🥇','🥈','🥉'];
+  sorted.forEach((u, i) => {
+    const medal = medals[i] || `${i+1}.`;
+    text += `${medal} *${u.name}* (\`${u.id}\`)\n`;
+    text += `   📊 Accounts: *${u.total}* | 💰 Credits: *${u.credits}*\n\n`;
+  });
+  bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+});
+
+bot.onText(/\/giveall (\d+)/, async (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+  const amount = parseInt(match[1]);
+  if (isNaN(amount) || amount <= 0) return bot.sendMessage(msg.chat.id, `❌ Usage: /giveall <amount>\nExample: /giveall 5`);
+  const db  = loadDB();
+  const ids = Object.keys(db.users);
+  if (!ids.length) return bot.sendMessage(msg.chat.id, `📭 No users yet.`);
+  ids.forEach(id => { db.users[id].credits += amount; });
+  saveDB(db);
+  bot.sendMessage(msg.chat.id,
+    `✅ *Credits Given to All!*\n${LINE}\n` +
+    `💰 *Amount* : *+${amount}* credits\n` +
+    `👥 *Users*  : *${ids.length}*\n` +
+    `${LINE}\nAll users have been notified! 🎉`,
+    { parse_mode: 'Markdown' }
+  );
+  for (const id of ids) {
+    await bot.sendMessage(toId(id),
+      `🎁 *Free Credits!*\n\nAdmin gave everyone *+${amount}* credits!\n💰 Your new balance: *${db.users[id].credits}*\n\nUse /menu to create accounts! 🚀`,
+      { parse_mode: 'Markdown' }
+    ).catch(() => {});
+    await new Promise(r => setTimeout(r, 50));
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
 //  REGISTER SLASH COMMANDS
 // ══════════════════════════════════════════════════════════════
 bot.setMyCommands([
@@ -870,6 +1174,9 @@ bot.setMyCommands([
   { command: 'menu',         description: '🏠 Open main menu' },
   { command: 'redeem',       description: '🎟️ Redeem a code for credits' },
   { command: 'credits',      description: '💰 Check your credits' },
+  { command: 'profile',      description: '👤 View your profile & stats' },
+  { command: 'expiry',       description: '⏳ Check account expiry countdown' },
+  { command: 'extend',       description: '🔄 Extend account expiry (2 credits/day)' },
   { command: 'createssh',    description: '🖥️ Create SSH (3 credits)' },
   { command: 'createvless',  description: '📡 Create VLESS (2 credits)' },
   { command: 'createvmess',  description: '📡 Create VMess (2 credits)' },
