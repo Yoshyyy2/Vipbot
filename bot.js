@@ -657,20 +657,29 @@ bot.onText(/\/redeem(.*)/, (msg, match) => {
   const entry = db.codes.find(c => c.code === code);
   if (!entry) return bot.sendMessage(msg.chat.id, `❌ *Invalid code!* Check the code and try again.`, { parse_mode: 'Markdown' });
 
-  // Daily redeem limit (3 per day per user, admin bypasses)
+  // Daily redeem limit (3 per 24 hours per user, admin bypasses)
   if (!isAdmin(userId)) {
-    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24h ago
     const allUsedToday = db.codes.reduce((count, c) => {
       const list = c.usedList || [];
-      return count + list.filter(u => toId(u.userId) === toId(userId) && new Date(u.usedAt) >= today).length;
+      return count + list.filter(u => toId(u.userId) === toId(userId) && new Date(u.usedAt) >= cutoff).length;
     }, 0);
     if (allUsedToday >= 3) {
-      const tomorrow = new Date(); tomorrow.setHours(24, 0, 0, 0);
-      const diff = tomorrow - new Date();
+      // Find earliest redeem in last 24h to calculate when slot opens
+      const myRedeems = [];
+      db.codes.forEach(c => {
+        (c.usedList || []).forEach(u => {
+          if (toId(u.userId) === toId(userId) && new Date(u.usedAt) >= cutoff) myRedeems.push(new Date(u.usedAt));
+        });
+      });
+      myRedeems.sort((a, b) => a - b);
+      const earliest  = myRedeems[0];
+      const nextSlot  = new Date(earliest.getTime() + 24 * 60 * 60 * 1000);
+      const diff      = nextSlot - new Date();
       const h = Math.floor(diff / 3600000);
       const m = Math.floor((diff % 3600000) / 60000);
       return bot.sendMessage(msg.chat.id,
-        `❌ *Daily Redeem Limit Reached!*\n\nYou can only redeem *3 codes per day*.\n⏰ Resets in: *${h}h ${m}m*`,
+        `❌ *Redeem Limit Reached!*\n\nYou can only redeem *3 codes per 24 hours*.\n⏰ Next slot in: *${h}h ${m}m*`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -1134,15 +1143,14 @@ bot.onText(/\/daily/, (msg) => {
 
   // Check if already claimed today
   if (u.lastDaily) {
-    const last     = new Date(u.lastDaily);
-    const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
-    if (last >= midnight) {
-      const tomorrow = new Date(now); tomorrow.setHours(24, 0, 0, 0);
-      const diff = tomorrow - now;
+    const last   = new Date(u.lastDaily);
+    const nextClaim = new Date(last.getTime() + 24 * 60 * 60 * 1000); // 24h after last claim
+    if (now < nextClaim) {
+      const diff = nextClaim - now;
       const h = Math.floor(diff / 3600000);
       const m = Math.floor((diff % 3600000) / 60000);
       return bot.sendMessage(msg.chat.id,
-        `⏰ *Already Claimed!*\n\nYou already claimed your daily credits today.\n\n🔄 Resets in: *${h}h ${m}m*`,
+        `⏰ *Already Claimed!*\n\nYou already claimed your daily credits.\n\n🔄 Next claim in: *${h}h ${m}m*`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -1195,6 +1203,54 @@ bot.setMyCommands([
   { command: 'myaccounts',   description: '📋 View my active accounts' },
   { command: 'help',         description: '📖 Show all commands' },
 ]).catch(() => {});
+
+// ══════════════════════════════════════════════════════════════
+//  DAILY REMINDER  (8:00 AM PH time = 0:00 UTC)
+// ══════════════════════════════════════════════════════════════
+async function sendDailyReminder() {
+  const db  = loadDB();
+  const now = new Date();
+  const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
+  const ids = Object.keys(db.users);
+  let sent = 0;
+
+  for (const id of ids) {
+    const u = db.users[id];
+    // Only notify users who haven't claimed today
+    const claimed = u.lastDaily && new Date(u.lastDaily) >= midnight;
+    if (!claimed) {
+      const amount = db.dailyCredits || DAILY_CREDITS;
+      await bot.sendMessage(toId(id),
+        `🌅 *Good Morning!*\n\n` +
+        `🎁 Your *+${amount} free daily credits* are ready to claim!\n\n` +
+        `Use /daily to claim now! 🚀`,
+        { parse_mode: 'Markdown' }
+      ).catch(() => {});
+      sent++;
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+  console.log(`[DAILY REMINDER] Sent to ${sent} users`);
+}
+
+// Schedule at 8:00 AM PH time (UTC+8 = 00:00 UTC)
+function scheduleDailyReminder() {
+  const now    = new Date();
+  const target = new Date(now);
+  // 8AM PH = 0AM UTC
+  target.setUTCHours(0, 0, 0, 0);
+  // If already past midnight UTC today, schedule for tomorrow
+  if (target <= now) target.setUTCDate(target.getUTCDate() + 1);
+  const msUntil = target - now;
+  const hUntil  = Math.floor(msUntil / 3600000);
+  const mUntil  = Math.floor((msUntil % 3600000) / 60000);
+  console.log(`[DAILY REMINDER] Scheduled in ${hUntil}h ${mUntil}m`);
+  setTimeout(() => {
+    sendDailyReminder();
+    setInterval(sendDailyReminder, 24 * 60 * 60 * 1000); // repeat every 24h
+  }, msUntil);
+}
+scheduleDailyReminder();
 
 bot.on('polling_error', err => console.error('[POLLING]', err.message));
 bot.on('error',         err => console.error('[BOT]',     err.message));
