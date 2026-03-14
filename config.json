@@ -1,9 +1,8 @@
 {
-  "BOT_TOKEN": "8561093955:AAFUVXlR4RqXsxaHzu-iuSeuL9hIIP7PE44",
+  "BOT_TOKEN": "7942164783:AAE_15vUPSu75UkBgUYgJl5F1_Q5n_fovf8",
   "ADMIN_ID": 6601184733,
   "SERVER_HOST": "wangx.yoshpan.com",
   "SERVER_NS": "ns-singapore.wangx.yoshpan.com",
-  "SERVER_PUBKEY": "75a53f93ce927e128f834f3c87b8e62dc2678167afe04fb2dc3c181751d56413",
-  "EXPIRY_DAYS": 3,
-  "DAILY_LIMIT": 3
+  "SERVER_PUBKEY": "de8bc2a27394081f3ea5dded04b7f167694ee0c1dedfe07cc6e4c2167c49f03b",
+  "EXPIRY_DAYS": 3
 }
