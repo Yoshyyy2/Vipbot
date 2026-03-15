@@ -19,6 +19,53 @@ const DAILY_CREDITS = config.DAILY_CREDITS || 2;
 const COST       = { ssh: 3, vless: 2, vmess: 2, trojan: 2 };
 const PROTO_ICON = { ssh: '🖥️', vless: '📡', vmess: '📡', trojan: '🛡️' };
 const LINE       = '━━━━━━━━━━━━━━━━━━━━━━';
+const CREATE_LIMIT = 3; // max SSH and V2Ray creations per 24h each
+
+// ── Queue System ──────────────────────────────────────────────
+const creationQueue = [];
+let   queueRunning  = false;
+
+async function runQueue() {
+  if (queueRunning) return;
+  queueRunning = true;
+  while (creationQueue.length > 0) {
+    const task = creationQueue.shift();
+    try { await task(); } catch (e) { console.error('[QUEUE ERROR]', e.message); }
+    await new Promise(r => setTimeout(r, 500)); // small gap between tasks
+  }
+  queueRunning = false;
+}
+
+function addToQueue(task) {
+  return new Promise((resolve, reject) => {
+    creationQueue.push(async () => {
+      try { resolve(await task()); } catch (e) { reject(e); }
+    });
+    runQueue();
+  });
+}
+
+// ── Anti-Spam ─────────────────────────────────────────────────
+const lastCommand = new Map(); // userId -> timestamp
+const SPAM_COOLDOWN = 3000;   // 3 seconds between commands
+
+function isSpamming(userId) {
+  const last = lastCommand.get(toId(userId));
+  if (last && Date.now() - last < SPAM_COOLDOWN) return true;
+  lastCommand.set(toId(userId), Date.now());
+  return false;
+}
+
+// ── Daily Creation Limit ──────────────────────────────────────
+function getDailyCreations(userId, types) {
+  const db     = loadDB();
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  return db.accounts.filter(a =>
+    a.userId === toId(userId) &&
+    types.includes(a.type) &&
+    new Date(a.createdAt) >= cutoff
+  ).length;
+}
 
 // ══════════════════════════════════════════════════════════════
 //  DATABASE
@@ -460,9 +507,9 @@ bot.on('message', async (msg) => {
     if (!isAdmin(userId) && getCredits(userId) < 3) {
       return bot.sendMessage(msg.chat.id, `❌ Not enough credits! Need *3*, you have *${getCredits(userId)}*.`, { parse_mode: 'Markdown', reply_markup: KB_BACK });
     }
-    const wait = await bot.sendMessage(msg.chat.id, `⏳ Creating SSH account, please wait...`);
+    const wait = await bot.sendMessage(msg.chat.id, `⏳ Creating SSH account, please wait...\n_You are in queue, please be patient._`);
     try {
-      await createSSH(username, text);
+      await addToQueue(async () => { await createSSH(username, text); });
       if (!isAdmin(userId)) deductCredits(userId, 3);
       const expiry = expiryISO();
       const db = loadDB(); db.accounts.push({ userId: toId(userId), username, password: text, type: 'ssh', expiry, createdAt: new Date().toISOString() }); saveDB(db);
@@ -492,9 +539,9 @@ bot.on('message', async (msg) => {
     if (!isAdmin(userId) && getCredits(userId) < 2) {
       return bot.sendMessage(msg.chat.id, `❌ Not enough credits! Need *2*, you have *${getCredits(userId)}*.`, { parse_mode: 'Markdown', reply_markup: KB_BACK });
     }
-    const wait = await bot.sendMessage(msg.chat.id, `⏳ Creating ${proto.toUpperCase()} account, please wait...`);
+    const wait = await bot.sendMessage(msg.chat.id, `⏳ Creating ${proto.toUpperCase()} account, please wait...\n_You are in queue, please be patient._`);
     try {
-      const result = proto === 'vless' ? await createVLESS(username) : await createVMess(username);
+      const result = await addToQueue(async () => proto === 'vless' ? await createVLESS(username) : await createVMess(username));
       if (!isAdmin(userId)) deductCredits(userId, 2);
       const expiry = expiryISO();
       const db = loadDB(); db.accounts.push({ userId: toId(userId), username, password: text, type: proto, expiry, createdAt: new Date().toISOString(), ...result }); saveDB(db);
@@ -514,9 +561,9 @@ bot.on('message', async (msg) => {
     if (!isAdmin(userId) && getCredits(userId) < 2) {
       return bot.sendMessage(msg.chat.id, `❌ Not enough credits! Need *2*, you have *${getCredits(userId)}*.`, { parse_mode: 'Markdown', reply_markup: KB_BACK });
     }
-    const wait = await bot.sendMessage(msg.chat.id, `⏳ Creating Trojan account, please wait...`);
+    const wait = await bot.sendMessage(msg.chat.id, `⏳ Creating Trojan account, please wait...\n_You are in queue, please be patient._`);
     try {
-      const result = await createTrojan(text);
+      const result = await addToQueue(async () => await createTrojan(text));
       if (!isAdmin(userId)) deductCredits(userId, 2);
       const expiry = expiryISO();
       const db = loadDB(); db.accounts.push({ userId: toId(userId), username: text, password: text, type: 'trojan', expiry, createdAt: new Date().toISOString(), ...result }); saveDB(db);
@@ -551,11 +598,11 @@ bot.on('callback_query', async (q) => {
     return bot.editMessageText(`❌ *Cancelled*\n\nReturning to menu...`,
       { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: KB_MAIN });
   }
-  if (data === 'menu_ssh')    { bot.deleteMessage(chatId, msgId).catch(() => {}); return startCreate(chatId, userId, 'ssh'); }
+  if (data === 'menu_ssh')    { bot.deleteMessage(chatId, msgId).catch(() => {}); return startCreate(chatId, userId, 'ssh', q.from.first_name); }
   if (data === 'menu_v2ray')  { return bot.editMessageText(`📡 *Create V2Ray Account*\n\nChoose a protocol:`, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: KB_V2RAY }); }
-  if (data === 'proto_vless') { bot.deleteMessage(chatId, msgId).catch(() => {}); return startCreate(chatId, userId, 'vless'); }
-  if (data === 'proto_vmess') { bot.deleteMessage(chatId, msgId).catch(() => {}); return startCreate(chatId, userId, 'vmess'); }
-  if (data === 'proto_trojan'){ bot.deleteMessage(chatId, msgId).catch(() => {}); return startCreate(chatId, userId, 'trojan'); }
+  if (data === 'proto_vless') { bot.deleteMessage(chatId, msgId).catch(() => {}); return startCreate(chatId, userId, 'vless', q.from.first_name); }
+  if (data === 'proto_vmess') { bot.deleteMessage(chatId, msgId).catch(() => {}); return startCreate(chatId, userId, 'vmess', q.from.first_name); }
+  if (data === 'proto_trojan'){ bot.deleteMessage(chatId, msgId).catch(() => {}); return startCreate(chatId, userId, 'trojan', q.from.first_name); }
 
   if (data === 'my_accounts') {
     const accs = getActiveAccounts(userId);
@@ -735,10 +782,10 @@ bot.onText(/\/credits/, (msg) => {
   );
 });
 
-bot.onText(/\/createssh/,    msg => { if (!isBanned(msg.from.id)) { registerUser(msg.from.id, msg.from.first_name); startCreate(msg.chat.id, msg.from.id, 'ssh'); }});
-bot.onText(/\/createvless/,  msg => { if (!isBanned(msg.from.id)) { registerUser(msg.from.id, msg.from.first_name); startCreate(msg.chat.id, msg.from.id, 'vless'); }});
-bot.onText(/\/createvmess/,  msg => { if (!isBanned(msg.from.id)) { registerUser(msg.from.id, msg.from.first_name); startCreate(msg.chat.id, msg.from.id, 'vmess'); }});
-bot.onText(/\/createtrojan/, msg => { if (!isBanned(msg.from.id)) { registerUser(msg.from.id, msg.from.first_name); startCreate(msg.chat.id, msg.from.id, 'trojan'); }});
+bot.onText(/\/createssh/,    msg => { if (!isBanned(msg.from.id)) { registerUser(msg.from.id, msg.from.first_name); startCreate(msg.chat.id, msg.from.id, 'ssh', msg.from.first_name); }});
+bot.onText(/\/createvless/,  msg => { if (!isBanned(msg.from.id)) { registerUser(msg.from.id, msg.from.first_name); startCreate(msg.chat.id, msg.from.id, 'vless', msg.from.first_name); }});
+bot.onText(/\/createvmess/,  msg => { if (!isBanned(msg.from.id)) { registerUser(msg.from.id, msg.from.first_name); startCreate(msg.chat.id, msg.from.id, 'vmess', msg.from.first_name); }});
+bot.onText(/\/createtrojan/, msg => { if (!isBanned(msg.from.id)) { registerUser(msg.from.id, msg.from.first_name); startCreate(msg.chat.id, msg.from.id, 'trojan', msg.from.first_name); }});
 
 bot.onText(/\/myaccounts/, (msg) => {
   if (isBanned(msg.from.id)) return;
